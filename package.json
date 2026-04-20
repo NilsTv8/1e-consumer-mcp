@@ -1,0 +1,38 @@
+{
+  "name": "1e-consumer-mcp",
+  "version": "1.0.0",
+  "description": "MCP server wrapping the 1E Consumer API",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "1e-consumer-mcp": "bin.mjs"
+  },
+  "files": [
+    "dist",
+    "bin.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc && chmod +x bin.mjs",
+    "dev": "TRANSPORT=stdio tsx src/index.ts",
+    "dev:http": "TRANSPORT=http tsx src/index.ts",
+    "start": "node dist/index.js",
+    "start:http": "TRANSPORT=http node dist/index.js",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
+    "docker:build": "docker build -t 1e-consumer-mcp .",
+    "docker:run": "docker run --rm -p 3000:3000 --env-file .env 1e-consumer-mcp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "node-fetch": "^3.3.2",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

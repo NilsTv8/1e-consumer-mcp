@@ -1,0 +1,48 @@
+services:
+
+  mcp:
+    build: .
+    restart: unless-stopped
+    environment:
+      TRANSPORT: http
+      PORT: "3000"
+      # 1E connection
+      ONE_E_BASE_URL: ${ONE_E_BASE_URL}
+      # Auth mode 1 – OAuth / JWT certificate (recommended)
+      ONE_E_PRIVATE_KEY: ${ONE_E_PRIVATE_KEY:-}
+      ONE_E_CERTIFICATE: ${ONE_E_CERTIFICATE:-}
+      ONE_E_APPLICATION_ID: ${ONE_E_APPLICATION_ID:-}
+      ONE_E_CONSUMER_NAME: ${ONE_E_CONSUMER_NAME:-}
+      # Auth mode 2 – static bearer token fallback
+      ONE_E_BEARER_TOKEN: ${ONE_E_BEARER_TOKEN:-}
+      # MCP endpoint auth
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN}
+      # CORS – set to your client origin, or leave * for open access
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      mcp:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:

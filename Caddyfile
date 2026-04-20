@@ -1,0 +1,23 @@
+# Replace {$DOMAIN} with your domain, e.g. mcp.yourcompany.com
+# Caddy automatically obtains and renews a Let's Encrypt certificate.
+# Make sure your DNS A record points to this server's public IP before deploying.
+
+{$DOMAIN} {
+    # Reverse proxy all traffic to the MCP server
+    reverse_proxy mcp:3000
+
+    # Logging
+    log {
+        output stdout
+        format json
+    }
+
+    # Security headers (supplements what the Node app already sets)
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+}

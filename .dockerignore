@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+*.log
+.git
+.gitignore
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
