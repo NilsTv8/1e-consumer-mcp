@@ -1,6 +1,6 @@
 # 1E Platform Consumer API — MCP Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that exposes the **1E Platform Consumer API** as 55 callable tools for any MCP-compatible LLM client (Claude Desktop, Cursor, etc.).
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that exposes the **1E Platform Consumer API** as 92 callable tools for any MCP-compatible LLM client (Claude Desktop, Cursor, etc.).
 
 ---
 
@@ -9,7 +9,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 | Controller | Tools |
 |---|---|
 | **ApplicableOperations** | Get by type ID, Get by type name, Add, Delete |
-| **Approvals** | Approve instruction/scheduled/persistent, CanApprove checks (×3), Pending notifications (×4) |
+| **Approvals** | Approve instruction/scheduled/persistent (×3), CanApprove checks (×3), Pending notifications (×4) |
 | **AuditLogs** | Search, Add entries |
 | **Authentication** | 2FA token for instruction, 2FA token for scheduled instruction |
 | **CachedUserGroupMemberships** | Get, Add, Delete, Get groups for user, Add groups for user, Remove groups for user, Get users in group |
@@ -18,6 +18,12 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 | **Consumers** | List, Get by ID, Get by name, Search, Add, Update, Delete, Delete many, Refresh cache |
 | **CustomProperties** | Get by type ID/name, Get by ID, Search, Add, Update, Delete, Delete many |
 | **CustomPropertyTypes** | List, Add |
+| **Devices** | List, Search, Get by FQDN, Get by Tachyon GUID, Get management groups by FQDN, Summary |
+| **ManagementGroups** (device groups) | List, Get by ID, Get by name, Search, Get contents, Get all devices |
+| **InstructionDefinitions** | List, Get by ID, Get by name, Search |
+| **Instructions** | Send, Send to device, Get by ID, Search, Get statistics (×2), Get responses (×2), Get responding devices, Get target list, Cancel, Rerun |
+| **ScheduledInstructions** | Create, Get by ID, Search, Update, Cancel, Delete |
+| **PersistentInstructions** | Create, Get by ID, Search, Cancel, Delete |
 
 ---
 
@@ -25,9 +31,9 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 
 ```
 src/
-├── index.ts    # MCP stdio server entry point
-├── client.ts   # HTTP client with auth + retry helpers
-└── tools.ts    # All 55 tool definitions
+├── index.ts    # MCP server entry point (stdio + Streamable HTTP transports)
+├── client.ts   # HTTP client — auth (OAuth/JWT, bearer, API key), token cache, retries
+└── tools.ts    # All 92 tool definitions
 package.json
 tsconfig.json
 ```
@@ -44,27 +50,51 @@ npm install
 
 ### 2. Set environment variables
 
-| Variable | Required | Description |
+`ONE_E_BASE_URL` is always required, e.g. `https://your-tenant.1e.com/consumer`. Pick **one** auth mode:
+
+| Mode | Variables | Notes |
 |---|---|---|
-| `ONE_E_BASE_URL` | ✅ | e.g. `https://1edev.dev.preprod.1e.com/consumer` |
-| `ONE_E_BEARER_TOKEN` | one of these | Bearer token |
-| `ONE_E_API_KEY` | one of these | API key (`X-API-Key` header) |
-| `ONE_E_USERNAME` + `ONE_E_PASSWORD` | one of these | Basic auth |
+| **1. OAuth / JWT Certificate Assertion** (preferred, auto-rotating) | `ONE_E_PRIVATE_KEY` (or `ONE_E_PRIVATE_KEY_FILE`), `ONE_E_CERTIFICATE` (or `ONE_E_CERTIFICATE_FILE`), `ONE_E_APPLICATION_ID`, `ONE_E_CONSUMER_NAME` | Signs a client-assertion JWT (RS256), exchanges it for a Tachyon token, caches it (5 min safety buffer before expiry) |
+| **2. Static bearer token** | `ONE_E_BEARER_TOKEN` | Manual rotation |
+| **3. API key** | `ONE_E_API_KEY` | Sent as `X-API-Key` |
 
 ```bash
-export ONE_E_BASE_URL=https://1edev.dev.preprod.1e.com/consumer
-export ONE_E_BEARER_TOKEN=your-token-here
+export ONE_E_BASE_URL=https://your-tenant.1e.com/consumer
+export ONE_E_PRIVATE_KEY_FILE=/path/to/key.pem
+export ONE_E_CERTIFICATE_FILE=/path/to/cert.pem
+export ONE_E_APPLICATION_ID=<azure-ad-app-id>
+export ONE_E_CONSUMER_NAME=<tachyon-consumer-name>
 ```
 
 ### 3. Run
 
 ```bash
-# Development
+# Development (stdio)
 npm run dev
+
+# Development (Streamable HTTP)
+npm run dev:http
 
 # Production
 npm run build && npm start
 ```
+
+---
+
+## Transports
+
+Controlled by the `TRANSPORT` env var:
+
+- `stdio` (default) — for Claude Desktop / local MCP clients
+- `http` — Streamable HTTP on `PORT` (default `3000`), endpoint `/mcp`, health check `/health`
+
+HTTP-only env vars:
+
+| Variable | Description |
+|---|---|
+| `PORT` | HTTP port (default `3000`) |
+| `MCP_AUTH_TOKEN` | If set, all `/mcp` requests must carry `Authorization: Bearer <token>` |
+| `CORS_ORIGIN` | Allowed CORS origin (default `*`) |
 
 ---
 
@@ -79,8 +109,11 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
       "command": "node",
       "args": ["/absolute/path/to/1e-consumer-mcp/dist/index.js"],
       "env": {
-        "ONE_E_BASE_URL": "https://1edev.dev.preprod.1e.com/consumer",
-        "ONE_E_BEARER_TOKEN": "your-token-here"
+        "ONE_E_BASE_URL": "https://your-tenant.1e.com/consumer",
+        "ONE_E_PRIVATE_KEY_FILE": "/absolute/path/to/key.pem",
+        "ONE_E_CERTIFICATE_FILE": "/absolute/path/to/cert.pem",
+        "ONE_E_APPLICATION_ID": "<azure-ad-app-id>",
+        "ONE_E_CONSUMER_NAME": "<tachyon-consumer-name>"
       }
     }
   }
