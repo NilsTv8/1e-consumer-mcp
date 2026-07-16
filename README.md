@@ -93,8 +93,35 @@ HTTP-only env vars:
 | Variable | Description |
 |---|---|
 | `PORT` | HTTP port (default `3000`) |
-| `MCP_AUTH_TOKEN` | If set, all `/mcp` requests must carry `Authorization: Bearer <token>` |
-| `CORS_ORIGIN` | Allowed CORS origin (default `*`) |
+| `MCP_AUTH_TOKEN` | **Required.** All `/mcp` requests must carry `Authorization: Bearer <token>`. The server refuses to start in HTTP mode without it. |
+| `CORS_ORIGIN` | Allowed CORS origin (default `*`) — echoed back literally, never inferred from the request |
+| `ONE_E_CLIENT_SUPPLIED_KEY` | Set to `true` to run in **per-client credential mode** (see below) |
+
+---
+
+## Hosting for multiple MCP clients (Claude, Copilot, etc.)
+
+Run in `http` mode to let several MCP clients connect to one running server instance. Two credential models, controlled by `ONE_E_CLIENT_SUPPLIED_KEY`:
+
+**Shared identity** (default, `ONE_E_CLIENT_SUPPLIED_KEY` unset) — the server holds one 1E credential (any of the 3 auth modes above) and every connecting client uses it. `MCP_AUTH_TOKEN` is the only thing gating access to your hosted server.
+
+**Per-client identity** (`ONE_E_CLIENT_SUPPLIED_KEY=true`) — each client supplies its *own* 1E API key on the request that opens its session, via an `X-API-Key` header. The server builds a fresh, isolated 1E client for that session and uses it for every tool call the session makes — nobody's calls run under anyone else's 1E identity. This requires each connecting user/service to already have their own 1E API key issued (auth mode 3 only — OAuth/JWT and static bearer tokens aren't supported for pass-through, since sending a private key or long-lived bearer token per request is not something clients should do).
+
+There are still two separate headers in this mode:
+
+| Header | Purpose |
+|---|---|
+| `Authorization: Bearer <MCP_AUTH_TOKEN>` | Gates access to your hosted server at all (same shared secret for every client) |
+| `X-API-Key: <their 1E API key>` | Sent once, on the request that opens a session — determines *which* 1E identity that session's tool calls run as |
+
+```bash
+export ONE_E_BASE_URL=https://your-tenant.1e.com/consumer
+export ONE_E_CLIENT_SUPPLIED_KEY=true
+export MCP_AUTH_TOKEN=$(openssl rand -hex 32)
+TRANSPORT=http npm start
+```
+
+Each MCP client config then needs both headers set — check your client's docs for how it lets you set custom headers on an HTTP MCP connection.
 
 ---
 

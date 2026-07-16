@@ -15,6 +15,10 @@ services:
       ONE_E_CONSUMER_NAME: ${ONE_E_CONSUMER_NAME:-}
       # Auth mode 2 – static bearer token fallback
       ONE_E_BEARER_TOKEN: ${ONE_E_BEARER_TOKEN:-}
+      # Set to "true" to require each connecting MCP client to supply its own
+      # 1E API key via X-API-Key, instead of every client sharing the identity
+      # configured above
+      ONE_E_CLIENT_SUPPLIED_KEY: ${ONE_E_CLIENT_SUPPLIED_KEY:-}
       # MCP endpoint auth
       MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN}
       # CORS – set to your client origin, or leave * for open access
