@@ -26,6 +26,10 @@ services:
       MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
       # CORS – set to your client origin, or leave * for open access
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      # Comma-separated tool allowlist — unset for the full 92-tool catalog,
+      # or override with your own scope. See .env.example for the default
+      # (device health identification + remediation).
+      ONE_E_TOOL_ALLOWLIST: ${ONE_E_TOOL_ALLOWLIST:-}
     expose:
       - "3000"
     healthcheck:

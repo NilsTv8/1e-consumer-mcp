@@ -105,7 +105,7 @@ Run in `http` mode to let several MCP clients connect to one running server inst
 
 **Shared identity** (default, `ONE_E_CLIENT_SUPPLIED_KEY` unset) — the server holds one 1E credential (any of the 3 auth modes above) and every connecting client uses it. `MCP_AUTH_TOKEN` gates access to your hosted server and is required in this mode.
 
-**Per-client identity** (`ONE_E_CLIENT_SUPPLIED_KEY=true`) — each client supplies its *own* 1E API key on the request that opens its session, via an `X-API-Key` header (or an `api_key`/`apiKey` query parameter, for clients like Microsoft Copilot Studio whose "API key" auth option only supports query strings). The server builds a fresh, isolated 1E client for that session and uses it for every tool call the session makes — nobody's calls run under anyone else's 1E identity. This requires each connecting user/service to already have their own 1E API key issued (auth mode 3 only — OAuth/JWT and static bearer tokens aren't supported for pass-through, since sending a private key or long-lived bearer token per request is not something clients should do).
+**Per-client identity** (`ONE_E_CLIENT_SUPPLIED_KEY=true`) — each client supplies its *own* 1E credential on the request that opens its session, via an `X-API-Key` header (or an `api_key`/`apiKey` query parameter, for clients like Microsoft Copilot Studio whose "API key" auth option only supports query strings). The server builds a fresh, isolated 1E client for that session and uses it for every tool call the session makes — nobody's calls run under anyone else's 1E identity. Despite the header's name, the value is forwarded to 1E as a bearer token (`X-Tachyon-Authenticate`), not literally as `X-API-Key` — that's what worked empirically against a live tenant for Tachyon-issued session tokens (1E rejected the same token via `X-API-Key` with "No authentication token found," but accepted it via `X-Tachyon-Authenticate`). OAuth/JWT pass-through isn't supported — sending a private key per request is not something clients should do.
 
 `MCP_AUTH_TOKEN` becomes **optional** in this mode: a valid `X-API-Key` satisfies the access gate on its own, since MCP clients that can only configure one credential (Copilot Studio included) can't also send a separate `Authorization: Bearer` header. If you do set `MCP_AUTH_TOKEN`, it's still accepted as an alternate path for clients that support two headers.
 
@@ -134,6 +134,20 @@ Known limitation: the SSRF check resolves DNS once at session-creation time, not
 | `X-1E-Base-URL: <their tenant URL>` | Determines *which* 1E tenant a session's calls hit | Optional even when `ONE_E_CLIENT_SUPPLIED_TENANT=true` — omit to fall back to `ONE_E_BASE_URL` |
 
 Check your MCP client's docs for how it lets you set custom headers (or query parameters) on an HTTP connection.
+
+### Restricting the tool catalog
+
+By default all 92 tools are available. Set `ONE_E_TOOL_ALLOWLIST` to a comma-separated list of tool names to expose only a subset — everything else disappears from `tools/list` and is rejected if called anyway. Applies to both transports. Useful because an LLM pays a real token cost just to reason over the tool catalog on every turn, so a narrowly-scoped deployment should ship a narrow tool list, not all 92.
+
+`.env.example` ships with a recommended scope for **device health identification and remediation** — find devices → find the right health-check/remediation instruction → run it → track it to completion:
+
+```bash
+ONE_E_TOOL_ALLOWLIST=devices_list,devices_search,devices_get_by_fqdn,devices_summary,management_groups_list,management_groups_get_contents,instruction_definitions_search,instruction_definitions_get_by_name,instructions_send,instructions_send_to_device,instructions_get_by_id,instructions_get_statistics,instructions_get_statistics_detail,instructions_get_responses,instructions_get_responses_aggregate,instructions_rerun,instructions_cancel
+```
+
+That's 17 tools instead of 92. It deliberately excludes approvals, persistent/scheduled instructions, and custom properties — add those back in if your remediation workflow needs an approval step, continuous (not just on-demand) monitoring, or health state tracked via custom properties rather than instruction responses.
+
+Comment the line out (or unset the variable) to expose the full 92-tool catalog instead. An unknown tool name in the list fails the server at startup with a clear error, rather than silently having no effect.
 
 ---
 
