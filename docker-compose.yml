@@ -19,8 +19,11 @@ services:
       # 1E API key via X-API-Key, instead of every client sharing the identity
       # configured above
       ONE_E_CLIENT_SUPPLIED_KEY: ${ONE_E_CLIENT_SUPPLIED_KEY:-}
-      # MCP endpoint auth
-      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN}
+      # Set to "true" (requires ONE_E_CLIENT_SUPPLIED_KEY above) to let each
+      # session pick its own 1E tenant via X-1E-Base-URL, SSRF-validated
+      ONE_E_CLIENT_SUPPLIED_TENANT: ${ONE_E_CLIENT_SUPPLIED_TENANT:-}
+      # MCP endpoint auth — required unless ONE_E_CLIENT_SUPPLIED_KEY=true
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
       # CORS – set to your client origin, or leave * for open access
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
     expose:

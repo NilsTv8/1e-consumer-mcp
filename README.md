@@ -99,29 +99,41 @@ HTTP-only env vars:
 
 ---
 
-## Hosting for multiple MCP clients (Claude, Copilot, etc.)
+## Hosting for multiple MCP clients (Claude, Copilot Studio, etc.)
 
-Run in `http` mode to let several MCP clients connect to one running server instance. Two credential models, controlled by `ONE_E_CLIENT_SUPPLIED_KEY`:
+Run in `http` mode to let several MCP clients connect to one running server instance. Two independent credential models:
 
-**Shared identity** (default, `ONE_E_CLIENT_SUPPLIED_KEY` unset) — the server holds one 1E credential (any of the 3 auth modes above) and every connecting client uses it. `MCP_AUTH_TOKEN` is the only thing gating access to your hosted server.
+**Shared identity** (default, `ONE_E_CLIENT_SUPPLIED_KEY` unset) — the server holds one 1E credential (any of the 3 auth modes above) and every connecting client uses it. `MCP_AUTH_TOKEN` gates access to your hosted server and is required in this mode.
 
-**Per-client identity** (`ONE_E_CLIENT_SUPPLIED_KEY=true`) — each client supplies its *own* 1E API key on the request that opens its session, via an `X-API-Key` header. The server builds a fresh, isolated 1E client for that session and uses it for every tool call the session makes — nobody's calls run under anyone else's 1E identity. This requires each connecting user/service to already have their own 1E API key issued (auth mode 3 only — OAuth/JWT and static bearer tokens aren't supported for pass-through, since sending a private key or long-lived bearer token per request is not something clients should do).
+**Per-client identity** (`ONE_E_CLIENT_SUPPLIED_KEY=true`) — each client supplies its *own* 1E API key on the request that opens its session, via an `X-API-Key` header (or an `api_key`/`apiKey` query parameter, for clients like Microsoft Copilot Studio whose "API key" auth option only supports query strings). The server builds a fresh, isolated 1E client for that session and uses it for every tool call the session makes — nobody's calls run under anyone else's 1E identity. This requires each connecting user/service to already have their own 1E API key issued (auth mode 3 only — OAuth/JWT and static bearer tokens aren't supported for pass-through, since sending a private key or long-lived bearer token per request is not something clients should do).
 
-There are still two separate headers in this mode:
-
-| Header | Purpose |
-|---|---|
-| `Authorization: Bearer <MCP_AUTH_TOKEN>` | Gates access to your hosted server at all (same shared secret for every client) |
-| `X-API-Key: <their 1E API key>` | Sent once, on the request that opens a session — determines *which* 1E identity that session's tool calls run as |
+`MCP_AUTH_TOKEN` becomes **optional** in this mode: a valid `X-API-Key` satisfies the access gate on its own, since MCP clients that can only configure one credential (Copilot Studio included) can't also send a separate `Authorization: Bearer` header. If you do set `MCP_AUTH_TOKEN`, it's still accepted as an alternate path for clients that support two headers.
 
 ```bash
 export ONE_E_BASE_URL=https://your-tenant.1e.com/consumer
 export ONE_E_CLIENT_SUPPLIED_KEY=true
-export MCP_AUTH_TOKEN=$(openssl rand -hex 32)
 TRANSPORT=http npm start
 ```
 
-Each MCP client config then needs both headers set — check your client's docs for how it lets you set custom headers on an HTTP MCP connection.
+### Per-client tenant selection
+
+By default every session hits the one tenant configured in `ONE_E_BASE_URL`. Set `ONE_E_CLIENT_SUPPLIED_TENANT=true` (requires `ONE_E_CLIENT_SUPPLIED_KEY=true`) to let each session pick its own tenant instead, via an `X-1E-Base-URL` header (or `base_url`/`baseUrl` query parameter):
+
+```bash
+export ONE_E_CLIENT_SUPPLIED_TENANT=true
+```
+
+Arbitrary caller-supplied URLs are a real SSRF vector, so every one is validated before use: HTTPS-only, `localhost` rejected, and the hostname is DNS-resolved and rejected if it lands on a private, loopback, or link-local address (link-local — `169.254.0.0/16` — is where AWS/GCP/Azure serve instance credentials from, so this specifically blocks the classic cloud-metadata SSRF). This is a startup-configured, deliberate opt-in — it's refused to start if enabled without `ONE_E_CLIENT_SUPPLIED_KEY`, since arbitrary tenant selection must never be paired with the server's own shared credential (a caller could otherwise exfiltrate it by pointing "tenant" at a server they control).
+
+Known limitation: the SSRF check resolves DNS once at session-creation time, not on every subsequent request — a sufficiently sophisticated DNS-rebinding attack could still slip through between the check and the actual request. Fine for testing/internal use; a production-grade multi-tenant deployment should additionally pin the resolved IP via a custom fetch dispatcher.
+
+| Header | Purpose | Required when |
+|---|---|---|
+| `Authorization: Bearer <MCP_AUTH_TOKEN>` | Alternate gate credential | Only if `MCP_AUTH_TOKEN` is set and the client can't send `X-API-Key` |
+| `X-API-Key: <their 1E API key>` | Determines *which* 1E identity a session's calls run as, and satisfies the gate on its own | `ONE_E_CLIENT_SUPPLIED_KEY=true` |
+| `X-1E-Base-URL: <their tenant URL>` | Determines *which* 1E tenant a session's calls hit | Optional even when `ONE_E_CLIENT_SUPPLIED_TENANT=true` — omit to fall back to `ONE_E_BASE_URL` |
+
+Check your MCP client's docs for how it lets you set custom headers (or query parameters) on an HTTP connection.
 
 ---
 

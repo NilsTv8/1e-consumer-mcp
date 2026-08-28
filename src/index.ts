@@ -12,14 +12,41 @@
  *
  * HTTP-only env vars:
  *   PORT                        HTTP port (default 3000)
- *   MCP_AUTH_TOKEN              Required. All /mcp requests must carry "Authorization: Bearer <token>"
+ *   MCP_AUTH_TOKEN              All /mcp requests must carry "Authorization: Bearer <token>" to pass
+ *                               the gate. Required unless ONE_E_CLIENT_SUPPLIED_KEY is set, in which
+ *                               case a valid X-API-Key alone also satisfies the gate — for MCP
+ *                               clients (e.g. Microsoft Copilot Studio) that can only configure one
+ *                               credential rather than two separate headers.
  *   ONE_E_CLIENT_SUPPLIED_KEY   Set to "true" to run in per-client credential mode: each session
- *                               must supply its own 1E API key via the "X-API-Key" header instead
- *                               of the server using one shared, env-configured 1E identity.
+ *                               must supply its own 1E credential via the "X-API-Key" header (or an
+ *                               "api_key"/"apiKey" query parameter, for clients that only support
+ *                               query-string auth) instead of the server using one shared,
+ *                               env-configured 1E identity. Despite the header's name, the value is
+ *                               forwarded to 1E as a bearer token (X-Tachyon-Authenticate) — that's
+ *                               what worked empirically for Tachyon-issued session tokens; a true
+ *                               1E "API key" credential has not been verified through this path.
+ *   ONE_E_CLIENT_SUPPLIED_TENANT  Set to "true" to let each session also pick its own 1E tenant via
+ *                               the "X-1E-Base-URL" header (or a "base_url"/"baseUrl" query
+ *                               parameter), instead of every session hitting ONE_E_BASE_URL.
+ *                               Requires ONE_E_CLIENT_SUPPLIED_KEY=true — arbitrary tenant selection
+ *                               must never be paired with the server's own shared credential, or a
+ *                               caller could exfiltrate it by pointing "tenant" at a server they
+ *                               control. Every supplied URL is validated (HTTPS-only, DNS-resolved,
+ *                               rejected if it resolves to a private/loopback/link-local address —
+ *                               link-local in particular is where cloud metadata endpoints live)
+ *                               before any request is made to it.
+ *
+ * ONE_E_TOOL_ALLOWLIST  Optional (any transport). Comma-separated list of tool names to expose —
+ *                       everything else is hidden from tools/list and rejected if called anyway.
+ *                       Unset = all tools available (default, unchanged behavior). Use this to scope
+ *                       a deployment down to just what one agent's use case needs, cutting the token
+ *                       cost of the tool catalog an LLM has to reason over.
  */
 
 import { createServer, IncomingMessage } from "node:http";
 import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIPv4, isIPv6 } from "node:net";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -38,6 +65,26 @@ import tools from "./tools.js";
 
 const sharedClient = createClientFromEnv();
 
+// ─── Tool allowlist ─────────────────────────────────────────────────────────────
+// Optional deployment-wide scope-down. Applies to both transports.
+
+const TOOL_ALLOWLIST = process.env.ONE_E_TOOL_ALLOWLIST
+  ? new Set(process.env.ONE_E_TOOL_ALLOWLIST.split(",").map((n) => n.trim()).filter(Boolean))
+  : null;
+
+if (TOOL_ALLOWLIST) {
+  const knownNames = new Set(tools.map((t) => t.name));
+  const unknown = [...TOOL_ALLOWLIST].filter((n) => !knownNames.has(n));
+  if (unknown.length > 0) {
+    throw new Error(
+      `ONE_E_TOOL_ALLOWLIST references unknown tool name(s): ${unknown.join(", ")}\n` +
+        "Check for typos against the tool names in src/tools.ts."
+    );
+  }
+}
+
+const activeTools = TOOL_ALLOWLIST ? tools.filter((t) => TOOL_ALLOWLIST.has(t.name)) : tools;
+
 // ─── MCP server factory ───────────────────────────────────────────────────────
 // Creates a new Server instance per transport connection (required by the SDK —
 // each Server can only be connected to one transport at a time). `client` is
@@ -51,7 +98,7 @@ function createMcpServer(client: OneEConsumerClient): Server {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map((t) => ({
+    tools: activeTools.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
@@ -61,7 +108,7 @@ function createMcpServer(client: OneEConsumerClient): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
-    const tool = tools.find((t) => t.name === name);
+    const tool = activeTools.find((t) => t.name === name);
     if (!tool) {
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
@@ -118,6 +165,7 @@ async function startStdio() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("1E Consumer MCP server running on stdio");
+  console.error(`  Tools:    ${activeTools.length} of ${tools.length}${TOOL_ALLOWLIST ? " (allowlist active)" : ""}`);
 }
 
 // ─── HTTP mode ────────────────────────────────────────────────────────────────
@@ -140,6 +188,110 @@ function securityHeaders(): Record<string, string> {
   };
 }
 
+// ─── SSRF guard for caller-supplied 1E tenant URLs ─────────────────────────────
+// A caller-chosen base URL is a live SSRF vector: outbound requests would go
+// wherever it points. Block private/loopback/link-local addresses — link-local
+// (169.254.0.0/16) in particular is where cloud metadata endpoints live (AWS,
+// GCP, Azure all serve instance credentials from 169.254.169.254).
+
+const BLOCKED_IPV4_RANGES: [string, number][] = [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10], // carrier-grade NAT
+  ["127.0.0.0", 8], // loopback
+  ["169.254.0.0", 16], // link-local — cloud metadata endpoints
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["224.0.0.0", 4], // multicast+
+];
+
+function ipv4ToInt(ip: string): number {
+  return ip.split(".").reduce((acc, octet) => (acc << 8) + Number(octet), 0) >>> 0;
+}
+
+function isBlockedIPv4(ip: string): boolean {
+  const target = ipv4ToInt(ip);
+  return BLOCKED_IPV4_RANGES.some(([base, bits]) => {
+    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+    return (target & mask) === (ipv4ToInt(base) & mask);
+  });
+}
+
+function isBlockedIPv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  if (lower === "::1" || lower === "::") return true; // loopback / unspecified
+  if (lower.startsWith("fe80:")) return true; // link-local
+  if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // unique local, fc00::/7
+  if (lower.startsWith("::ffff:")) return isBlockedIPv4(lower.slice(7)); // IPv4-mapped
+  return false;
+}
+
+/**
+ * Validates a caller-supplied 1E base URL before it's ever used in a request.
+ * Requires HTTPS, rejects obviously-internal hostnames, and DNS-resolves the
+ * host to reject anything landing on a private/loopback/link-local address.
+ *
+ * Known limitation: this checks DNS at validation time, not at each request.
+ * A DNS-rebinding attack (hostname resolves safely here, then to an internal
+ * address moments later when fetch() itself resolves it) could still slip
+ * through. Good enough for a test/internal deployment; a production-grade
+ * multi-tenant host should additionally pin the resolved IP via a custom
+ * fetch dispatcher rather than relying on this check alone.
+ */
+async function validateTenantBaseUrl(raw: string): Promise<string> {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`Invalid tenant URL: ${raw}`);
+  }
+
+  if (url.protocol !== "https:") {
+    throw new Error("Tenant URL must use https://");
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) {
+    throw new Error("Tenant URL may not target localhost");
+  }
+
+  if (isIPv4(hostname)) {
+    if (isBlockedIPv4(hostname)) throw new Error("Tenant URL resolves to a blocked address range");
+  } else if (isIPv6(hostname)) {
+    if (isBlockedIPv6(hostname)) throw new Error("Tenant URL resolves to a blocked address range");
+  } else {
+    const addresses = await lookup(hostname, { all: true });
+    for (const { address, family } of addresses) {
+      const blocked = family === 4 ? isBlockedIPv4(address) : isBlockedIPv6(address);
+      if (blocked) throw new Error("Tenant URL resolves to a blocked address range");
+    }
+  }
+
+  // Preserve the path (e.g. "/consumer") — url.origin alone would drop it.
+  return (url.origin + url.pathname).replace(/\/$/, "");
+}
+
+// Reads the caller-supplied tenant base URL from the X-1E-Base-URL header,
+// falling back to a base_url/baseUrl query parameter.
+function extractTenantBaseUrl(req: IncomingMessage, url: URL): string | undefined {
+  const header = req.headers["x-1e-base-url"];
+  const fromHeader = Array.isArray(header) ? header[0] : header;
+  if (fromHeader) return fromHeader;
+  return url.searchParams.get("base_url") ?? url.searchParams.get("baseUrl") ?? undefined;
+}
+
+// Reads the caller-supplied 1E credential from the X-API-Key header, falling
+// back to an api_key/apiKey query parameter for clients (e.g. Microsoft
+// Copilot Studio) whose "API key" auth option only supports query strings.
+function extractApiKey(req: IncomingMessage, url: URL): string | undefined {
+  const header = req.headers["x-api-key"];
+  const fromHeader = Array.isArray(header) ? header[0] : header;
+  if (fromHeader) return fromHeader;
+  return url.searchParams.get("api_key") ?? url.searchParams.get("apiKey") ?? undefined;
+}
+
 function corsHeaders(): Record<string, string> {
   const allowed = process.env.CORS_ORIGIN ?? "*";
   return {
@@ -148,7 +300,7 @@ function corsHeaders(): Record<string, string> {
     "Access-Control-Allow-Origin": allowed,
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, Mcp-Session-Id, X-API-Key",
+      "Content-Type, Authorization, Mcp-Session-Id, X-API-Key, X-1E-Base-URL",
     "Access-Control-Max-Age": "86400",
   };
 }
@@ -157,13 +309,24 @@ async function startHttp() {
   const PORT = parseInt(process.env.PORT ?? "3000", 10);
   const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
   const CLIENT_SUPPLIED_KEY = process.env.ONE_E_CLIENT_SUPPLIED_KEY === "true";
+  const CLIENT_SUPPLIED_TENANT = process.env.ONE_E_CLIENT_SUPPLIED_TENANT === "true";
 
-  if (!AUTH_TOKEN) {
+  if (!AUTH_TOKEN && !CLIENT_SUPPLIED_KEY) {
     throw new Error(
       "Missing required environment variable: MCP_AUTH_TOKEN\n" +
         "HTTP transport requires an auth token so /mcp isn't reachable by anyone " +
         "on the network or in a browser tab. Set it to a strong random secret, e.g.:\n" +
-        "  export MCP_AUTH_TOKEN=$(openssl rand -hex 32)"
+        "  export MCP_AUTH_TOKEN=$(openssl rand -hex 32)\n" +
+        "(Not required when ONE_E_CLIENT_SUPPLIED_KEY=true — a valid X-API-Key satisfies the gate instead.)"
+    );
+  }
+
+  if (CLIENT_SUPPLIED_TENANT && !CLIENT_SUPPLIED_KEY) {
+    throw new Error(
+      "ONE_E_CLIENT_SUPPLIED_TENANT requires ONE_E_CLIENT_SUPPLIED_KEY=true.\n" +
+        "Arbitrary caller-chosen tenants must never be paired with the server's own " +
+        "shared 1E credential — a caller could exfiltrate it by pointing the tenant " +
+        "at a server they control."
     );
   }
 
@@ -176,6 +339,7 @@ async function startHttp() {
 
   const httpServer = createServer(async (req, res) => {
     const baseHeaders = { ...securityHeaders(), ...corsHeaders() };
+    const reqUrl = new URL(req.url ?? "/", "http://localhost");
 
     try {
       // ── CORS preflight ──────────────────────────────────────────────────
@@ -186,7 +350,7 @@ async function startHttp() {
       }
 
       // ── Health check ────────────────────────────────────────────────────
-      if (req.method === "GET" && req.url === "/health") {
+      if (req.method === "GET" && reqUrl.pathname === "/health") {
         res.writeHead(200, { ...baseHeaders, "Content-Type": "application/json" });
         res.end(JSON.stringify({
           status: "ok",
@@ -197,17 +361,26 @@ async function startHttp() {
       }
 
       // ── Only handle /mcp ────────────────────────────────────────────────
-      if (req.url !== "/mcp" && req.url !== "/mcp/") {
+      if (reqUrl.pathname !== "/mcp" && reqUrl.pathname !== "/mcp/") {
         res.writeHead(404, baseHeaders);
         res.end(JSON.stringify({ error: "Not found" }));
         return;
       }
 
-      // ── Bearer auth ──────────────────────────────────────────────────────
+      // ── Gate: a matching Bearer token always passes. In per-client mode, a
+      // caller-supplied X-API-Key also passes on its own — MCP clients (e.g.
+      // Copilot Studio) that can only configure one credential use this path,
+      // and the key gets real validation downstream against the 1E API.
       const auth = req.headers["authorization"];
-      if (typeof auth !== "string" || !safeCompare(auth, `Bearer ${AUTH_TOKEN}`)) {
+      const bearerOk = typeof auth === "string" && !!AUTH_TOKEN && safeCompare(auth, `Bearer ${AUTH_TOKEN}`);
+      const apiKey = CLIENT_SUPPLIED_KEY ? extractApiKey(req, reqUrl) : undefined;
+      if (!bearerOk && !apiKey) {
         res.writeHead(401, { ...baseHeaders, "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Unauthorized" }));
+        res.end(JSON.stringify({
+          error: CLIENT_SUPPLIED_KEY
+            ? "Unauthorized. Supply either \"Authorization: Bearer <token>\" or a valid X-API-Key (header or ?api_key= query param)."
+            : "Unauthorized",
+        }));
         return;
       }
 
@@ -234,22 +407,42 @@ async function startHttp() {
       }
 
       // In per-client mode, each new session brings its own 1E identity via
-      // X-API-Key rather than using the server's shared, env-configured one.
+      // the API key that already got it past the gate above, and optionally
+      // its own tenant.
       let sessionClient = sharedClient;
       if (CLIENT_SUPPLIED_KEY) {
-        const apiKeyHeader = req.headers["x-api-key"];
-        const apiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
         if (!apiKey) {
           res.writeHead(401, { ...baseHeaders, "Content-Type": "application/json" });
           res.end(JSON.stringify({
-            error: "Missing X-API-Key header. This server requires each client to supply its own 1E API key.",
+            error: "Missing X-API-Key. This server requires each client to supply its own 1E credential.",
           }));
           return;
         }
+
+        let sessionBaseUrl = baseUrl;
+        if (CLIENT_SUPPLIED_TENANT) {
+          const tenantOverride = extractTenantBaseUrl(req, reqUrl);
+          if (tenantOverride) {
+            try {
+              sessionBaseUrl = await validateTenantBaseUrl(tenantOverride);
+            } catch (err) {
+              res.writeHead(400, { ...baseHeaders, "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                error: err instanceof Error ? err.message : "Invalid X-1E-Base-URL",
+              }));
+              return;
+            }
+          }
+        }
+
+        // Empirically, credentials supplied this way (e.g. a Tachyon-issued
+        // session/bearer token copied from the DEX UI) are rejected by 1E
+        // via X-API-Key ("No authentication token found") but accepted via
+        // X-Tachyon-Authenticate — so forward as bearerToken, not apiKey.
         sessionClient = new OneEConsumerClient({
-          baseUrl,
+          baseUrl: sessionBaseUrl,
           consumerName: process.env.ONE_E_CONSUMER_NAME,
-          apiKey,
+          bearerToken: apiKey,
         });
       }
 
@@ -293,13 +486,23 @@ async function startHttp() {
     console.error(`1E Consumer MCP server running on HTTP port ${PORT}`);
     console.error(`  Endpoint: http://0.0.0.0:${PORT}/mcp`);
     console.error(`  Health:   http://0.0.0.0:${PORT}/health`);
-    console.error("  Auth:     Bearer token required");
+    console.error(
+      AUTH_TOKEN
+        ? "  Gate:     Bearer token" + (CLIENT_SUPPLIED_KEY ? " OR a valid X-API-Key" : " required")
+        : "  Gate:     valid X-API-Key required (no MCP_AUTH_TOKEN configured)"
+    );
     console.error(
       CLIENT_SUPPLIED_KEY
-        ? "  1E Auth:  per-client — each session supplies its own X-API-Key"
+        ? "  1E Auth:  per-client — each session supplies its own X-API-Key (header or ?api_key=)"
         : "  1E Auth:  shared server identity (env-configured)"
     );
+    console.error(
+      CLIENT_SUPPLIED_TENANT
+        ? "  Tenant:   per-client — X-1E-Base-URL (or ?base_url=) selects the 1E tenant, SSRF-checked"
+        : `  Tenant:   fixed — ${baseUrl}`
+    );
     console.error(`  CORS:     ${process.env.CORS_ORIGIN ?? "*"}`);
+    console.error(`  Tools:    ${activeTools.length} of ${tools.length}${TOOL_ALLOWLIST ? " (allowlist active)" : ""}`);
   });
 }
 
