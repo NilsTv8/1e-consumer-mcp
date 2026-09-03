@@ -297,6 +297,14 @@ export class OneEConsumerClient {
       method,
       headers: await this.buildAuthHeaders(),
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      // Never follow redirects. A caller-supplied tenant URL (see
+      // ONE_E_CLIENT_SUPPLIED_TENANT in index.ts) is SSRF-validated once,
+      // before this call — silently following a redirect would let a
+      // validated-but-malicious server hop the real credential to an
+      // unvalidated address afterward. 1E's API has no legitimate reason
+      // to redirect; a 3xx response falls through to the !response.ok
+      // branch below and surfaces as a normal ApiError.
+      redirect: "manual",
     });
 
     const text = await response.text();
