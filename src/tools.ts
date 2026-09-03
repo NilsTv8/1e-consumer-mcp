@@ -2,7 +2,7 @@
  * MCP Tool Definitions — 1E Platform Consumer API
  *
  * Generated from:
- *   https://1edev.dev.preprod.1e.com/consumer/swagger/v1/swagger.json
+ *   https://your-tenant.1e.com/consumer/swagger/v1/swagger.json
  *
  * Controllers covered:
  *   ApplicableOperations · Approvals · AuditLogs · Authentication

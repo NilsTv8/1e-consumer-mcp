@@ -151,6 +151,46 @@ Comment the line out (or unset the variable) to expose the full 92-tool catalog 
 
 ---
 
+## Running with Docker
+
+`Dockerfile` + `docker-compose.yml` give you a two-stage build (compiles, then a slim runtime image running as a non-root user) with a health check.
+
+### 1. Configure
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`: set `ONE_E_BASE_URL`, pick one auth mode (see the table above), and set `MCP_AUTH_TOKEN` (unless you're using `ONE_E_CLIENT_SUPPLIED_KEY=true`, per [Hosting for multiple MCP clients](#hosting-for-multiple-mcp-clients-claude-copilot-studio-etc)).
+
+### 2. Run
+
+```bash
+docker compose up -d
+```
+
+The server listens on `PORT` (default `3000`) over plain HTTP — it doesn't terminate TLS itself. For anything beyond local use, put it behind whatever reverse proxy or tunnel you already use for TLS (nginx, Caddy, your cloud provider's load balancer, Tailscale Funnel, etc.), forwarding to that port.
+
+### 3. Verify
+
+```bash
+curl http://localhost:3000/health
+# {"status":"ok","sessions":0,"uptime":...}
+```
+
+### Operating it
+
+```bash
+docker compose logs -f mcp     # tail server logs
+docker compose restart mcp     # pick up new env vars (in-memory sessions are lost — see note below)
+docker compose down            # stop everything
+docker compose up -d --build   # rebuild after a code change and restart
+```
+
+**Sessions live in memory** and don't survive a restart — any MCP client with an open session will need to reconnect after one (it'll get a "session not found" until it does). Fine for a single instance; don't run multiple replicas of this service without externalizing session state first.
+
+---
+
 ## Connect to Claude Desktop
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):

@@ -30,30 +30,11 @@ services:
       # or override with your own scope. See .env.example for the default
       # (device health identification + remediation).
       ONE_E_TOOL_ALLOWLIST: ${ONE_E_TOOL_ALLOWLIST:-}
-    expose:
-      - "3000"
+    ports:
+      - "${PORT:-3000}:3000"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1))"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"   # HTTP/3
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      mcp:
-        condition: service_healthy
-
-volumes:
-  caddy_data:
-  caddy_config:
