@@ -2,6 +2,8 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that exposes the **1E Platform Consumer API** as 92 callable tools for any MCP-compatible LLM client (Claude Desktop, Cursor, etc.).
 
+Already running and want to know how to actually use it? See [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md) — connecting a client and working the device health identification/remediation workflow with example prompts.
+
 ---
 
 ## Covered endpoints
