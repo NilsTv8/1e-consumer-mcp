@@ -25,6 +25,8 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 | **ScheduledInstructions** | Create, Get by ID, Search, Update, Cancel, Delete |
 | **PersistentInstructions** | Create, Get by ID, Search, Cancel, Delete |
 
+Full per-tool reference (name, description, required params) lives in [`docs/TOOLS.md`](docs/TOOLS.md).
+
 ---
 
 ## Project structure
@@ -76,7 +78,11 @@ npm run dev
 npm run dev:http
 
 # Production
-npm run build && npm start
+npm run build && npm start        # stdio
+npm run build && npm run start:http   # HTTP
+
+# Debug interactively with the MCP Inspector
+npm run inspect
 ```
 
 ---
@@ -93,7 +99,7 @@ HTTP-only env vars:
 | Variable | Description |
 |---|---|
 | `PORT` | HTTP port (default `3000`) |
-| `MCP_AUTH_TOKEN` | **Required.** All `/mcp` requests must carry `Authorization: Bearer <token>`. The server refuses to start in HTTP mode without it. |
+| `MCP_AUTH_TOKEN` | **Required unless `ONE_E_CLIENT_SUPPLIED_KEY=true`** (see below). All `/mcp` requests must carry `Authorization: Bearer <token>`. The server refuses to start in HTTP mode without one or the other. |
 | `CORS_ORIGIN` | Allowed CORS origin (default `*`) — echoed back literally, never inferred from the request |
 | `ONE_E_CLIENT_SUPPLIED_KEY` | Set to `true` to run in **per-client credential mode** (see below) |
 
@@ -169,6 +175,13 @@ Edit `.env`: set `ONE_E_BASE_URL`, pick one auth mode (see the table above), and
 docker compose up -d
 ```
 
+Or without Compose, using the plain Docker CLI directly:
+
+```bash
+npm run docker:build   # docker build -t 1e-consumer-mcp .
+npm run docker:run     # docker run --rm -p 3000:3000 --env-file .env 1e-consumer-mcp
+```
+
 The server listens on `PORT` (default `3000`) over plain HTTP — it doesn't terminate TLS itself. For anything beyond local use, put it behind whatever reverse proxy or tunnel you already use for TLS (nginx, Caddy, your cloud provider's load balancer, Tailscale Funnel, etc.), forwarding to that port.
 
 ### 3. Verify
@@ -238,3 +251,9 @@ Copy this pattern into `src/tools.ts`:
   },
 },
 ```
+
+---
+
+## License
+
+[MIT](LICENSE)
